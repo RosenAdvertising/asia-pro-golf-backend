@@ -9,12 +9,16 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+// Import and use routes
+const eventsRoutes = require('./routes/events');
+app.use('/events', eventsRoutes);
+
 // Test Route
 app.get('/', (req, res) => {
-  res.send('Asia Pro Golf Backend is running!');
+    res.send('Asia Pro Golf Backend is running!');
 });
 
 // Start Server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
 });
