@@ -40,8 +40,8 @@ class EventsCache {
         // If cache is invalid or data not found, query the database
         console.log('🔄 Fetching fresh events data from database');
         
-        let baseQuery = 'SELECT * FROM events WHERE 1=1';
-        let countQuery = 'SELECT COUNT(*) FROM events WHERE 1=1';
+        let baseQuery = 'SELECT * FROM events WHERE 1=1 AND end_date >= CURRENT_DATE';
+        let countQuery = 'SELECT COUNT(*) FROM events WHERE 1=1 AND end_date >= CURRENT_DATE';
         let values = [];
         let counter = 1;
 
