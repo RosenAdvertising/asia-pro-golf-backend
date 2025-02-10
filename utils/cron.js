@@ -20,6 +20,19 @@ async function fetchPlayerData(tourId) {
     return response.data.players;
 }
 
+// Temporary function to inspect player data structure
+async function inspectPlayerData() {
+    try {
+        const player = await fetchPlayerData('pga'); // Get PGA tour players
+        if (player && player[0]) {
+            console.log('Example player data structure:');
+            console.log(JSON.stringify(player[0], null, 2));
+        }
+    } catch (error) {
+        console.error('Error fetching player data:', error);
+    }
+}
+
 // Update player data and rankings
 async function updatePlayers() {
     const client = await pool.connect();
@@ -134,5 +147,6 @@ function scheduleTasks() {
 
 module.exports = {
     scheduleTasks,
-    updatePlayers // Export for manual running if needed
+    updatePlayers, // Export for manual running if needed
+    inspectPlayerData // Export for manual inspection if needed
 };
