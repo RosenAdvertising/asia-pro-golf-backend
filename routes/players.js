@@ -18,11 +18,9 @@ router.get('/', async (req, res) => {
                 p.*,
                 ps.year_end_ranking,
                 ps.scoring_average,
-                ps.tournament_wins,
-                t.name as tour_name
+                ps.tournament_wins
             FROM players p
             LEFT JOIN player_statistics ps ON p.id = ps.player_id
-            LEFT JOIN tours t ON p.tour_id = t.id
             ORDER BY 
                 COALESCE(ps.year_end_ranking, 999999),
                 p.last_name,
@@ -37,7 +35,7 @@ router.get('/', async (req, res) => {
             country: player.country,
             nationality: player.nationality,
             profile_image_url: player.profile_image_url,
-            tour: player.tour_name || 'N/A',
+            tour: player.tour || 'N/A', // Use the tour field from players table
             year_end_ranking: player.year_end_ranking || null,
             scoring_average: player.scoring_average || null,
             tournament_wins: player.tournament_wins || 0
@@ -63,16 +61,14 @@ router.get('/:id', async (req, res) => {
             SELECT 
                 p.*,
                 ps.*,
-                t.name as tour_name,
                 json_agg(DISTINCT pa.*) FILTER (WHERE pa.id IS NOT NULL) as achievements,
                 json_agg(DISTINCT tr.*) FILTER (WHERE tr.id IS NOT NULL AND tr.tournament_date >= NOW() - INTERVAL '12 months') as recent_results
             FROM players p
             LEFT JOIN player_statistics ps ON p.id = ps.player_id
-            LEFT JOIN tours t ON p.tour_id = t.id
             LEFT JOIN player_achievements pa ON p.id = pa.player_id
             LEFT JOIN tournament_results tr ON p.id = tr.player_id
             WHERE p.id = $1
-            GROUP BY p.id, ps.id, t.id
+            GROUP BY p.id, ps.id
         `, [id]);
 
         if (result.rows.length === 0) {
@@ -86,7 +82,7 @@ router.get('/:id', async (req, res) => {
             ...player,
             achievements: player.achievements?.[0] ? player.achievements : [],
             recent_results: player.recent_results?.[0] ? player.recent_results : [],
-            tour: player.tour_name || 'N/A'
+            tour: player.tour || 'N/A'
         };
 
         res.json(transformedPlayer);
