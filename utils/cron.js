@@ -190,16 +190,20 @@ async function updatePlayers() {
 
 // Schedule tasks
 function scheduleTasks() {
-    // Run player updates every Monday at 1 AM
-    cron.schedule('0 1 * * 1', async () => {
+    // Run player updates every Monday at 10 AM UTC+7 (3 AM UTC)
+    cron.schedule('0 3 * * 1', async () => {
         try {
+            console.log('Starting scheduled player update at:', new Date().toISOString());
             await updatePlayers();
+            console.log('Completed scheduled player update at:', new Date().toISOString());
         } catch (error) {
             console.error('Scheduled player update failed:', error);
         }
+    }, {
+        timezone: "Asia/Bangkok"
     });
 
-    console.log('Cron jobs scheduled');
+    console.log('Cron jobs scheduled - Player updates will run every Monday at 10 AM UTC+7');
 }
 
 module.exports = {
