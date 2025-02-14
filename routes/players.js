@@ -19,6 +19,9 @@ router.get('/', async (req, res) => {
                 ps.year_end_ranking,
                 ps.scoring_average,
                 ps.tournament_wins,
+                ps.top_10_finishes,
+                ps.career_high_ranking,
+                ps.weeks_at_career_high,
                 EXTRACT(YEAR FROM AGE(CURRENT_DATE, p.birth_date)) as age
             FROM players p
             LEFT JOIN player_statistics ps ON p.id = ps.player_id
@@ -39,9 +42,15 @@ router.get('/', async (req, res) => {
             tour: player.tour,
             birth_date: player.birth_date,
             age: player.age,
+            instagram_handle: player.instagram_handle,
+            official_website: player.official_website,
+            equipment_sponsor: player.equipment_sponsor,
             year_end_ranking: player.year_end_ranking || null,
             scoring_average: player.scoring_average || null,
-            tournament_wins: player.tournament_wins || 0
+            tournament_wins: player.tournament_wins || 0,
+            top_10_finishes: player.top_10_finishes || null,
+            career_high_ranking: player.career_high_ranking || null,
+            weeks_at_career_high: player.weeks_at_career_high || null
         }));
 
         res.json(players);
