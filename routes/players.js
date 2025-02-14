@@ -22,7 +22,7 @@ router.get('/', async (req, res) => {
                 ps.top_10_finishes,
                 ps.career_high_ranking,
                 ps.weeks_at_career_high,
-                EXTRACT(YEAR FROM AGE(CURRENT_DATE, p.birth_date)) as age
+                EXTRACT(YEAR FROM AGE(CURRENT_DATE, p.birthday)) as age
             FROM players p
             LEFT JOIN player_statistics ps ON p.id = ps.player_id
             ORDER BY 
@@ -40,8 +40,13 @@ router.get('/', async (req, res) => {
             nationality: player.nationality,
             profile_image_url: player.profile_image_url,
             tour: player.tour,
-            birth_date: player.birth_date,
+            birthday: player.birthday,
             age: player.age,
+            alias: player.alias,
+            abbr_name: player.abbr_name,
+            handedness: player.handedness,
+            turned_pro: player.turned_pro,
+            member: player.member,
             instagram_handle: player.instagram_handle,
             official_website: player.official_website,
             equipment_sponsor: player.equipment_sponsor,
@@ -50,7 +55,8 @@ router.get('/', async (req, res) => {
             tournament_wins: player.tournament_wins || 0,
             top_10_finishes: player.top_10_finishes || null,
             career_high_ranking: player.career_high_ranking || null,
-            weeks_at_career_high: player.weeks_at_career_high || null
+            weeks_at_career_high: player.weeks_at_career_high || null,
+            updated: player.updated
         }));
 
         res.json(players);
@@ -73,7 +79,7 @@ router.get('/:id', async (req, res) => {
             SELECT 
                 p.*,
                 ps.*,
-                EXTRACT(YEAR FROM AGE(CURRENT_DATE, p.birth_date)) as age,
+                EXTRACT(YEAR FROM AGE(CURRENT_DATE, p.birthday)) as age,
                 json_agg(DISTINCT pa.*) FILTER (WHERE pa.id IS NOT NULL) as achievements,
                 json_agg(DISTINCT tr.*) FILTER (WHERE tr.id IS NOT NULL AND tr.tournament_date >= NOW() - INTERVAL '12 months') as recent_results
             FROM players p
@@ -90,15 +96,20 @@ router.get('/:id', async (req, res) => {
 
         const player = result.rows[0];
         
-        // Transform the data to handle null relationships
+        // Transform the data to handle null relationships and include new fields
         const transformedPlayer = {
             ...player,
             achievements: player.achievements?.[0] ? player.achievements : [],
             recent_results: player.recent_results?.[0] ? player.recent_results : [],
             tour: player.tour || 'N/A',
-            gender: player.gender,
-            birth_date: player.birth_date,
-            age: player.age
+            alias: player.alias,
+            abbr_name: player.abbr_name,
+            handedness: player.handedness,
+            turned_pro: player.turned_pro,
+            member: player.member,
+            birthday: player.birthday,
+            age: player.age,
+            updated: player.updated
         };
 
         res.json(transformedPlayer);
