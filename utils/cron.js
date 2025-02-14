@@ -1,7 +1,20 @@
 const cron = require('node-cron');
 const { Pool } = require('pg');
 const axios = require('axios');
-const { SPORTRADAR_API_KEY } = process.env;
+require('dotenv').config();
+
+const SPORTRADAR_API_KEY = process.env.SPORTRADAR_API_KEY;
+const SPORTRADAR_BASE_URL = 'https://api.sportradar.us/golf/trial/v3/en';
+
+// Map of tour IDs to their API identifiers
+const TOUR_IDS = {
+    pga: 'pga',
+    dpworld: 'euro', // DP World Tour (formerly European Tour)
+    lpga: 'lpga',
+    champions: 'champions', // PGA Tour Champions
+    kornferry: 'korn-ferry',
+    liv: 'liv'
+};
 
 // Initialize database pool
 const pool = new Pool({
@@ -11,174 +24,217 @@ const pool = new Pool({
     }
 });
 
-// Helper function to fetch player data from Sportradar
-async function fetchPlayerData(tourId) {
-    const baseUrl = 'http://api.sportradar.us/golf/trial/v3/en';
-    
-    // Fetch basic player profiles
-    const profileResponse = await axios.get(`${baseUrl}/tours/${tourId}/players/profiles.json`, {
-        params: { api_key: SPORTRADAR_API_KEY }
-    });
-    
-    // Fetch player statistics
-    const statsResponse = await axios.get(`${baseUrl}/tours/${tourId}/statistics.json`, {
-        params: { api_key: SPORTRADAR_API_KEY }
-    });
-    
-    // Fetch tournament results for the last 12 months
-    const today = new Date();
-    const lastYear = new Date(today.setFullYear(today.getFullYear() - 1));
-    const resultsResponse = await axios.get(`${baseUrl}/tours/${tourId}/tournaments/schedule.json`, {
-        params: { 
-            api_key: SPORTRADAR_API_KEY,
-            year: lastYear.getFullYear()
-        }
-    });
+// Helper function to add delay between API calls
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-    return {
-        players: profileResponse.data.players,
-        statistics: statsResponse.data.statistics,
-        tournaments: resultsResponse.data.tournaments
-    };
+// Helper function to make API calls with retry logic
+async function makeApiCall(url, params, retryCount = 3, delayMs = 1000) {
+    for (let i = 0; i < retryCount; i++) {
+        try {
+            // Add delay before each API call to respect rate limits
+            await delay(delayMs);
+            return await axios.get(url, { params });
+        } catch (error) {
+            if (error.response?.status === 429) { // Too Many Requests
+                console.log('Rate limit hit, waiting before retry...');
+                await delay(delayMs * 2); // Double the delay for rate limit errors
+                continue;
+            }
+            throw error;
+        }
+    }
+    throw new Error(`Failed after ${retryCount} retries`);
 }
 
-// Temporary function to inspect player data structure
-async function inspectPlayerData() {
+// Helper function to fetch player data from Sportradar
+async function fetchPlayerData(tourId) {
+    const baseUrl = SPORTRADAR_BASE_URL;
+    const currentYear = new Date().getFullYear();
+    const year = currentYear - 1; // Use previous year to ensure data availability
+    
     try {
-        const { players } = await fetchPlayerData('pga'); // Get PGA tour players
-        if (players && players[0]) {
-            console.log('Example player data structure:');
-            console.log(JSON.stringify(players[0], null, 2));
+        console.log(`Fetching ${tourId} tour data for year ${year}...`);
+        
+        // Try to fetch schedule for both current and previous year
+        let scheduleResponse;
+        try {
+            scheduleResponse = await makeApiCall(
+                `${baseUrl}/seasons/${year}/tours/${TOUR_IDS[tourId]}/schedule.json`,
+                { api_key: SPORTRADAR_API_KEY }
+            );
+        } catch (error) {
+            if (error.response?.status === 404) {
+                console.log(`No schedule found for ${year}, trying ${year - 1}...`);
+                scheduleResponse = await makeApiCall(
+                    `${baseUrl}/seasons/${year - 1}/tours/${TOUR_IDS[tourId]}/schedule.json`,
+                    { api_key: SPORTRADAR_API_KEY }
+                );
+            } else {
+                throw error;
+            }
         }
+        console.log(`Successfully fetched ${tourId} schedule`);
+        
+        if (!scheduleResponse.data.tournaments || scheduleResponse.data.tournaments.length === 0) {
+            console.log(`No tournaments found for ${tourId}`);
+            return { players: [], statistics: [], rankings: [] };
+        }
+        
+        // Fetch players list
+        const playersResponse = await makeApiCall(
+            `${baseUrl}/tours/${TOUR_IDS[tourId]}/players/profiles.json`,
+            { api_key: SPORTRADAR_API_KEY }
+        );
+        console.log(`Successfully fetched ${tourId} players data`);
+        
+        // Fetch player statistics
+        const statsResponse = await makeApiCall(
+            `${baseUrl}/seasons/${year}/tours/${TOUR_IDS[tourId]}/statistics/players.json`,
+            { api_key: SPORTRADAR_API_KEY }
+        );
+        console.log(`Successfully fetched ${tourId} statistics data`);
+        
+        // Fetch world golf rankings (shared across all tours)
+        const rankingsResponse = await makeApiCall(
+            `${baseUrl}/players/rankings.json`,
+            { api_key: SPORTRADAR_API_KEY }
+        );
+        console.log(`Successfully fetched world rankings data`);
+
+        return {
+            players: playersResponse.data.players || [],
+            statistics: statsResponse.data.players || [],
+            rankings: rankingsResponse.data.rankings || []
+        };
     } catch (error) {
-        console.error('Error fetching player data:', error);
+        console.error(`Error fetching ${tourId} data:`, error.response?.data || error.message);
+        // Return empty data instead of throwing to allow partial updates
+        return {
+            players: [],
+            statistics: [],
+            rankings: []
+        };
     }
 }
 
-// Update player data and rankings
+// Function to update player data in the database
 async function updatePlayers() {
+    console.log('Starting weekly player update...');
     const client = await pool.connect();
+    
     try {
-        console.log('Starting weekly player update...');
+        // Fetch data for main tours sequentially to avoid rate limits
+        console.log('Fetching PGA Tour data...');
+        const pgaData = await fetchPlayerData('pga');
+        
+        console.log('Fetching DP World Tour data...');
+        const dpworldData = await fetchPlayerData('dpworld');
+        
+        console.log('Fetching LPGA Tour data...');
+        const lpgaData = await fetchPlayerData('lpga');
 
+        // Combine player data from all tours
+        const allPlayers = [
+            ...pgaData.players,
+            ...dpworldData.players,
+            ...lpgaData.players
+        ];
+        const allStats = [
+            ...pgaData.statistics,
+            ...dpworldData.statistics,
+            ...lpgaData.statistics
+        ];
+        const rankings = [
+            ...pgaData.rankings,
+            ...dpworldData.rankings,
+            ...lpgaData.rankings
+        ];
+
+        if (allPlayers.length === 0) {
+            console.warn('No player data retrieved from any tour');
+            return;
+        }
+
+        console.log(`Retrieved ${allPlayers.length} players, starting database update...`);
         await client.query('BEGIN');
 
-        // Get data for each tour
-        const tours = ['pga', 'euro', 'apgc']; // Add other tours as needed
-        for (const tourId of tours) {
-            const { players, statistics, tournaments } = await fetchPlayerData(tourId);
-
-            for (const player of players) {
-                // Insert or update player basic info
-                const playerResult = await client.query(`
-                    INSERT INTO players (
-                        first_name, last_name, country, birth_date, height, 
-                        handedness, college, turned_pro, profile_image_url,
-                        nationality, languages_spoken, instagram_handle,
-                        official_website, equipment_sponsor
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                    ON CONFLICT (first_name, last_name) DO UPDATE SET
+        // Update players table
+        let updatedPlayers = 0;
+        for (const player of allPlayers) {
+            const stats = allStats.find(s => s.player_id === player.id);
+            const ranking = rankings.find(r => r.player_id === player.id);
+            
+            try {
+                await client.query(
+                    `INSERT INTO players (
+                        id, first_name, last_name, country, height, weight, 
+                        birth_date, birth_place, residence, college, tour
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (id) DO UPDATE SET
+                        first_name = EXCLUDED.first_name,
+                        last_name = EXCLUDED.last_name,
                         country = EXCLUDED.country,
-                        birth_date = EXCLUDED.birth_date,
                         height = EXCLUDED.height,
-                        handedness = EXCLUDED.handedness,
+                        weight = EXCLUDED.weight,
+                        birth_date = EXCLUDED.birth_date,
+                        birth_place = EXCLUDED.birth_place,
+                        residence = EXCLUDED.residence,
                         college = EXCLUDED.college,
-                        turned_pro = EXCLUDED.turned_pro,
-                        profile_image_url = EXCLUDED.profile_image_url,
-                        nationality = EXCLUDED.nationality,
-                        languages_spoken = EXCLUDED.languages_spoken,
-                        instagram_handle = EXCLUDED.instagram_handle,
-                        official_website = EXCLUDED.official_website,
-                        equipment_sponsor = EXCLUDED.equipment_sponsor
-                    RETURNING id
-                `, [
-                    player.first_name,
-                    player.last_name,
-                    player.country,
-                    player.birth_date,
-                    player.height,
-                    player.handedness,
-                    player.college,
-                    player.turned_pro,
-                    player.profile_image_url,
-                    player.nationality || player.country, // fallback to country if nationality not provided
-                    player.languages_spoken || [], // default empty array
-                    player.instagram_handle,
-                    player.official_website,
-                    player.equipment_sponsor
-                ]);
-
-                const playerId = playerResult.rows[0].id;
-
-                // Update player statistics
-                const playerStats = statistics?.players?.find(s => 
-                    s.first_name === player.first_name && s.last_name === player.last_name
+                        tour = EXCLUDED.tour,
+                        updated_at = CURRENT_TIMESTAMP`,
+                    [
+                        player.id,
+                        player.first_name,
+                        player.last_name,
+                        player.country,
+                        player.height,
+                        player.weight,
+                        player.birth_date,
+                        player.birth_place,
+                        player.residence,
+                        player.college,
+                        player.tour
+                    ]
                 );
 
-                if (playerStats) {
-                    await client.query(`
-                        INSERT INTO player_statistics (
+                // Update player statistics
+                if (stats) {
+                    await client.query(
+                        `INSERT INTO player_statistics (
                             player_id, scoring_average, top_10_finishes,
-                            tournament_wins, career_earnings, career_wins,
-                            career_high_ranking, weeks_at_career_high,
-                            year_end_ranking
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            tournament_wins, career_high_ranking,
+                            weeks_at_career_high, year_end_ranking,
+                            updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
                         ON CONFLICT (player_id) DO UPDATE SET
                             scoring_average = EXCLUDED.scoring_average,
                             top_10_finishes = EXCLUDED.top_10_finishes,
                             tournament_wins = EXCLUDED.tournament_wins,
-                            career_earnings = EXCLUDED.career_earnings,
-                            career_wins = EXCLUDED.career_wins,
                             career_high_ranking = EXCLUDED.career_high_ranking,
                             weeks_at_career_high = EXCLUDED.weeks_at_career_high,
                             year_end_ranking = EXCLUDED.year_end_ranking,
-                            updated_at = CURRENT_TIMESTAMP
-                    `, [
-                        playerId,
-                        playerStats.scoring_avg,
-                        playerStats.top_10,
-                        playerStats.first_place,
-                        playerStats.earnings,
-                        playerStats.career_wins,
-                        playerStats.career_high_rank,
-                        playerStats.weeks_at_career_high,
-                        playerStats.year_end_rank
-                    ]);
-                }
-
-                // Update tournament results
-                for (const tournament of tournaments || []) {
-                    const playerResult = tournament.leaderboard?.players?.find(p => 
-                        p.first_name === player.first_name && p.last_name === player.last_name
+                            updated_at = CURRENT_TIMESTAMP`,
+                        [
+                            player.id,
+                            stats.scoring_average,
+                            stats.top_10_finishes,
+                            stats.tournament_wins,
+                            ranking?.career_high || null,
+                            ranking?.weeks_at_career_high || null,
+                            ranking?.current_rank || null
+                        ]
                     );
-
-                    if (playerResult) {
-                        await client.query(`
-                            INSERT INTO tournament_results (
-                                player_id, tournament_name, tournament_date,
-                                finish_position, score, earnings, is_major
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                            ON CONFLICT (player_id, tournament_name, tournament_date) DO UPDATE SET
-                                finish_position = EXCLUDED.finish_position,
-                                score = EXCLUDED.score,
-                                earnings = EXCLUDED.earnings,
-                                is_major = EXCLUDED.is_major
-                        `, [
-                            playerId,
-                            tournament.name,
-                            tournament.start_date,
-                            playerResult.position,
-                            playerResult.score,
-                            playerResult.money,
-                            tournament.is_major || false
-                        ]);
-                    }
                 }
+                updatedPlayers++;
+            } catch (error) {
+                console.error(`Error updating player ${player.id}:`, error.message);
+                // Continue with next player instead of failing the entire batch
+                continue;
             }
         }
 
         await client.query('COMMIT');
-        console.log('Weekly player update completed successfully');
+        console.log(`Successfully updated ${updatedPlayers} players`);
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error during weekly player update:', error);
@@ -208,6 +264,5 @@ function scheduleTasks() {
 
 module.exports = {
     scheduleTasks,
-    updatePlayers, // Export for manual running if needed
-    inspectPlayerData // Export for manual inspection if needed
+    updatePlayers
 };
