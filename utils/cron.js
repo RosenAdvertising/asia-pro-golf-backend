@@ -4,7 +4,7 @@ const axios = require('axios');
 require('dotenv').config();
 
 const SPORTRADAR_API_KEY = process.env.SPORTRADAR_API_KEY;
-const SPORTRADAR_BASE_URL = 'https://api.sportradar.us/golf/trial/v3/en';
+const SPORTRADAR_BASE_URL = 'https://api.sportradar.com';
 
 // Map of tour IDs to their API identifiers
 const TOUR_IDS = {
@@ -28,13 +28,30 @@ const pool = new Pool({
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Helper function to make API calls with retry logic
-async function makeApiCall(url, params, retryCount = 3, delayMs = 1000) {
+async function makeApiCall(path, retryCount = 3, delayMs = 1000) {
+    const options = {
+        method: 'GET',
+        headers: {
+            'accept': 'application/json'
+        }
+    };
+
+    const url = `${SPORTRADAR_BASE_URL}${path}?api_key=${SPORTRADAR_API_KEY}`;
+    console.log('Making request to:', url);
+    
     for (let i = 0; i < retryCount; i++) {
         try {
             // Add delay before each API call to respect rate limits
             await delay(delayMs);
-            return await axios.get(url, { params });
+            const response = await axios.get(url, options);
+            return response;
         } catch (error) {
+            console.error('Error details:', {
+                status: error.response?.status,
+                data: error.response?.data,
+                headers: error.response?.headers
+            });
+            
             if (error.response?.status === 429) { // Too Many Requests
                 console.log('Rate limit hit, waiting before retry...');
                 await delay(delayMs * 2); // Double the delay for rate limit errors
@@ -48,67 +65,32 @@ async function makeApiCall(url, params, retryCount = 3, delayMs = 1000) {
 
 // Helper function to fetch player data from Sportradar
 async function fetchPlayerData(tourId) {
-    const baseUrl = SPORTRADAR_BASE_URL;
     const currentYear = new Date().getFullYear();
-    const year = currentYear - 1; // Use previous year to ensure data availability
     
     try {
-        console.log(`Fetching ${tourId} tour data for year ${year}...`);
+        console.log(`Fetching ${tourId} player data...`);
         
-        // Try to fetch schedule for both current and previous year
-        let scheduleResponse;
-        try {
-            scheduleResponse = await makeApiCall(
-                `${baseUrl}/seasons/${year}/tours/${TOUR_IDS[tourId]}/schedule.json`,
-                { api_key: SPORTRADAR_API_KEY }
-            );
-        } catch (error) {
-            if (error.response?.status === 404) {
-                console.log(`No schedule found for ${year}, trying ${year - 1}...`);
-                scheduleResponse = await makeApiCall(
-                    `${baseUrl}/seasons/${year - 1}/tours/${TOUR_IDS[tourId]}/schedule.json`,
-                    { api_key: SPORTRADAR_API_KEY }
-                );
-            } else {
-                throw error;
-            }
-        }
-        console.log(`Successfully fetched ${tourId} schedule`);
-        
-        if (!scheduleResponse.data.tournaments || scheduleResponse.data.tournaments.length === 0) {
-            console.log(`No tournaments found for ${tourId}`);
-            return { players: [], statistics: [], rankings: [] };
-        }
-        
-        // Fetch players list
+        // Get player profiles which includes basic info and statistics
         const playersResponse = await makeApiCall(
-            `${baseUrl}/tours/${TOUR_IDS[tourId]}/players/profiles.json`,
-            { api_key: SPORTRADAR_API_KEY }
+            `/golf/trial/${TOUR_IDS[tourId]}/v3/en/${currentYear}/players/profiles.json`
         );
-        console.log(`Successfully fetched ${tourId} players data`);
         
-        // Fetch player statistics
-        const statsResponse = await makeApiCall(
-            `${baseUrl}/seasons/${year}/tours/${TOUR_IDS[tourId]}/statistics/players.json`,
-            { api_key: SPORTRADAR_API_KEY }
-        );
-        console.log(`Successfully fetched ${tourId} statistics data`);
-        
-        // Fetch world golf rankings (shared across all tours)
-        const rankingsResponse = await makeApiCall(
-            `${baseUrl}/players/rankings.json`,
-            { api_key: SPORTRADAR_API_KEY }
-        );
-        console.log(`Successfully fetched world rankings data`);
+        // Log the full response for debugging
+        console.log('Response:', JSON.stringify(playersResponse.data, null, 2));
+        console.log(`Successfully fetched ${tourId} player data`);
 
         return {
             players: playersResponse.data.players || [],
-            statistics: statsResponse.data.players || [],
-            rankings: rankingsResponse.data.rankings || []
+            statistics: playersResponse.data.players || [],
+            rankings: playersResponse.data.players || []
         };
     } catch (error) {
         console.error(`Error fetching ${tourId} data:`, error.response?.data || error.message);
-        // Return empty data instead of throwing to allow partial updates
+        if (error.response) {
+            console.error('Full error response:', JSON.stringify(error.response.data, null, 2));
+            console.error('Status:', error.response.status);
+            console.error('Headers:', error.response.headers);
+        }
         return {
             players: [],
             statistics: [],
@@ -119,69 +101,50 @@ async function fetchPlayerData(tourId) {
 
 // Function to update player data in the database
 async function updatePlayers() {
-    console.log('Starting weekly player update...');
+    console.log('Starting player update...');
     const client = await pool.connect();
     
     try {
-        // Fetch data for main tours sequentially to avoid rate limits
+        // Only fetch PGA Tour data for now
         console.log('Fetching PGA Tour data...');
         const pgaData = await fetchPlayerData('pga');
-        
-        console.log('Fetching DP World Tour data...');
-        const dpworldData = await fetchPlayerData('dpworld');
-        
-        console.log('Fetching LPGA Tour data...');
-        const lpgaData = await fetchPlayerData('lpga');
 
-        // Combine player data from all tours
-        const allPlayers = [
-            ...pgaData.players,
-            ...dpworldData.players,
-            ...lpgaData.players
-        ];
-        const allStats = [
-            ...pgaData.statistics,
-            ...dpworldData.statistics,
-            ...lpgaData.statistics
-        ];
-        const rankings = [
-            ...pgaData.rankings,
-            ...dpworldData.rankings,
-            ...lpgaData.rankings
-        ];
-
-        if (allPlayers.length === 0) {
-            console.warn('No player data retrieved from any tour');
+        if (pgaData.players.length === 0) {
+            console.warn('No player data retrieved');
             return;
         }
 
-        console.log(`Retrieved ${allPlayers.length} players, starting database update...`);
+        console.log(`Retrieved ${pgaData.players.length} players, starting database update...`);
         await client.query('BEGIN');
 
         // Update players table
         let updatedPlayers = 0;
-        for (const player of allPlayers) {
-            const stats = allStats.find(s => s.player_id === player.id);
-            const ranking = rankings.find(r => r.player_id === player.id);
-            
+        for (const player of pgaData.players) {
             try {
                 await client.query(
                     `INSERT INTO players (
-                        id, first_name, last_name, country, height, weight, 
-                        birth_date, birth_place, residence, college, tour
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        id, first_name, last_name, country, height, weight,
+                        birth_place, residence, college, tour, alias,
+                        abbr_name, handedness, turned_pro, member,
+                        birthday, updated
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     ON CONFLICT (id) DO UPDATE SET
                         first_name = EXCLUDED.first_name,
                         last_name = EXCLUDED.last_name,
                         country = EXCLUDED.country,
                         height = EXCLUDED.height,
                         weight = EXCLUDED.weight,
-                        birth_date = EXCLUDED.birth_date,
                         birth_place = EXCLUDED.birth_place,
                         residence = EXCLUDED.residence,
                         college = EXCLUDED.college,
                         tour = EXCLUDED.tour,
-                        updated_at = CURRENT_TIMESTAMP`,
+                        alias = EXCLUDED.alias,
+                        abbr_name = EXCLUDED.abbr_name,
+                        handedness = EXCLUDED.handedness,
+                        turned_pro = EXCLUDED.turned_pro,
+                        member = EXCLUDED.member,
+                        birthday = EXCLUDED.birthday,
+                        updated = EXCLUDED.updated`,
                     [
                         player.id,
                         player.first_name,
@@ -189,43 +152,21 @@ async function updatePlayers() {
                         player.country,
                         player.height,
                         player.weight,
-                        player.birth_date,
                         player.birth_place,
                         player.residence,
                         player.college,
-                        player.tour
+                        'pga', // hardcoded for now since we're only fetching PGA
+                        player.alias,
+                        player.abbr_name,
+                        player.handedness,
+                        player.turned_pro,
+                        player.member,
+                        player.birthday,
+                        player.updated
                     ]
                 );
-
-                // Update player statistics
-                if (stats) {
-                    await client.query(
-                        `INSERT INTO player_statistics (
-                            player_id, scoring_average, top_10_finishes,
-                            tournament_wins, career_high_ranking,
-                            weeks_at_career_high, year_end_ranking,
-                            updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-                        ON CONFLICT (player_id) DO UPDATE SET
-                            scoring_average = EXCLUDED.scoring_average,
-                            top_10_finishes = EXCLUDED.top_10_finishes,
-                            tournament_wins = EXCLUDED.tournament_wins,
-                            career_high_ranking = EXCLUDED.career_high_ranking,
-                            weeks_at_career_high = EXCLUDED.weeks_at_career_high,
-                            year_end_ranking = EXCLUDED.year_end_ranking,
-                            updated_at = CURRENT_TIMESTAMP`,
-                        [
-                            player.id,
-                            stats.scoring_average,
-                            stats.top_10_finishes,
-                            stats.tournament_wins,
-                            ranking?.career_high || null,
-                            ranking?.weeks_at_career_high || null,
-                            ranking?.current_rank || null
-                        ]
-                    );
-                }
                 updatedPlayers++;
+                console.log(`Updated player ${player.first_name} ${player.last_name}`);
             } catch (error) {
                 console.error(`Error updating player ${player.id}:`, error.message);
                 // Continue with next player instead of failing the entire batch
@@ -237,7 +178,7 @@ async function updatePlayers() {
         console.log(`Successfully updated ${updatedPlayers} players`);
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Error during weekly player update:', error);
+        console.error('Error during player update:', error);
         throw error;
     } finally {
         client.release();
