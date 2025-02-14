@@ -8,6 +8,7 @@ const getAllEvents = async (req, res) => {
             country: req.query.country,
             start_date: req.query.start_date,
             end_date: req.query.end_date,
+            owgr: req.query.owgr,
             limit: req.query.limit,
             page: req.query.page
         };

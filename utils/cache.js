@@ -13,6 +13,7 @@ class EventsCache {
             country: filters.country || null,
             start_date: filters.start_date || null,
             end_date: filters.end_date || null,
+            owgr: filters.owgr || null,
             limit: filters.limit || 10,
             page: filters.page || 1
         });
@@ -70,6 +71,13 @@ class EventsCache {
             baseQuery += ` AND end_date <= $${counter}`;
             countQuery += ` AND end_date <= $${counter}`;
             values.push(filters.end_date);
+            counter++;
+        }
+
+        if (filters.owgr) {
+            baseQuery += ` AND owgr = $${counter}`;
+            countQuery += ` AND owgr = $${counter}`;
+            values.push(filters.owgr === 'true');
             counter++;
         }
 
