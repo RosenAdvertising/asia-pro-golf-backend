@@ -1,11 +1,28 @@
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
+const multer = require('multer');
+const { uploadImage, updateImage, deleteImage } = require('../utils/cloudinary');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
         rejectUnauthorized: false
+    }
+});
+
+// Configure multer for handling file uploads
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Not an image! Please upload an image.'), false);
+        }
     }
 });
 
@@ -56,7 +73,8 @@ router.get('/', async (req, res) => {
             top_10_finishes: player.top_10_finishes || null,
             career_high_ranking: player.career_high_ranking || null,
             weeks_at_career_high: player.weeks_at_career_high || null,
-            updated: player.updated
+            updated: player.updated,
+            image_url: player.image_url || null
         }));
 
         res.json(players);
@@ -67,6 +85,66 @@ router.get('/', async (req, res) => {
             details: error.message,
             stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
+    }
+});
+
+// Upload or update player image
+router.post('/:id/image', upload.single('image'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!req.file) {
+            return res.status(400).json({ error: 'No image file provided' });
+        }
+
+        // Create a Buffer from the file
+        const buffer = req.file.buffer;
+        const base64Image = `data:${req.file.mimetype};base64,${buffer.toString('base64')}`;
+
+        // Generate a public ID for Cloudinary based on player ID
+        const publicId = `players/${id}`;
+
+        // Upload to Cloudinary
+        const imageUrl = await uploadImage(base64Image, publicId);
+
+        // Update player record with new image URL
+        await pool.query(
+            'UPDATE players SET image_url = $1 WHERE id = $2',
+            [imageUrl, id]
+        );
+
+        res.json({ imageUrl });
+    } catch (err) {
+        console.error('Error uploading player image:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Delete player image
+router.delete('/:id/image', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Get current image URL
+        const result = await pool.query(
+            'SELECT image_url FROM players WHERE id = $1',
+            [id]
+        );
+
+        if (result.rows[0]?.image_url) {
+            // Delete from Cloudinary
+            await deleteImage(`players/${id}`);
+
+            // Update player record
+            await pool.query(
+                'UPDATE players SET image_url = NULL WHERE id = $1',
+                [id]
+            );
+        }
+
+        res.json({ message: 'Image deleted successfully' });
+    } catch (err) {
+        console.error('Error deleting player image:', err);
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -109,7 +187,8 @@ router.get('/:id', async (req, res) => {
             member: player.member,
             birthday: player.birthday,
             age: player.age,
-            updated: player.updated
+            updated: player.updated,
+            image_url: player.image_url || null
         };
 
         res.json(transformedPlayer);
