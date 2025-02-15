@@ -1,6 +1,6 @@
-require('dotenv').config();
-const { Pool } = require('pg');
 const axios = require('axios');
+const { Pool } = require('pg');
+require('dotenv').config();
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -10,66 +10,122 @@ const pool = new Pool({
 });
 
 const SPORTRADAR_API_KEY = process.env.SPORTRADAR_API_KEY;
-const SPORTRADAR_BASE_URL = 'http://api.sportradar.us/golf/trial/v3/en';
+const SPORTRADAR_BASE_URL = 'https://api.sportradar.com/golf/trial';
+
+// Map of tour codes to their full names
+const TOURS = {
+    'pga': 'PGA Tour',
+    'lpga': 'LPGA',
+    'champ': 'PGA Tour Champions',
+    'euro': 'PGA European Tour',
+    'liv': 'LIV Golf',
+    'pgad': 'Korn Ferry Tour',
+    'oly': 'Olympics'
+};
+
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function updatePlayerData() {
     try {
         console.log('Starting player data update...');
-
-        // First, let's get all tours to check membership
-        const toursUrl = `${SPORTRADAR_BASE_URL}/tours/hierarchy.json?api_key=${SPORTRADAR_API_KEY}`;
-        const { data: toursData } = await axios.get(toursUrl);
         
-        // Get all players from our database
-        const { rows: players } = await pool.query('SELECT id, first_name, last_name FROM players');
-
-        for (const player of players) {
+        for (const [tourCode, tourName] of Object.entries(TOURS)) {
+            console.log(`Checking ${tourName} (${tourCode}) for Thai players...`);
+            
             try {
-                // Search for player in Sportsradar API
-                const searchUrl = `${SPORTRADAR_BASE_URL}/players/search/${encodeURIComponent(player.first_name + ' ' + player.last_name)}.json?api_key=${SPORTRADAR_API_KEY}`;
-                const { data: searchResult } = await axios.get(searchUrl);
+                // Get player profiles for the specific tour
+                const profilesUrl = `${SPORTRADAR_BASE_URL}/${tourCode}/v3/en/2023/players/profiles.json?api_key=${SPORTRADAR_API_KEY}`;
+                console.log('Requesting:', profilesUrl);
+                
+                const { data: tourData } = await axios.get(profilesUrl);
 
-                if (searchResult.players && searchResult.players.length > 0) {
-                    const playerData = searchResult.players[0];
-                    
-                    // Get detailed player info including tour membership
-                    const playerUrl = `${SPORTRADAR_BASE_URL}/players/${playerData.id}/profile.json?api_key=${SPORTRADAR_API_KEY}`;
-                    const { data: playerProfile } = await axios.get(playerUrl);
-
-                    // Get player's tour memberships
-                    const memberships = playerProfile.tours?.map(tour => tour.name).join(', ') || null;
-
-                    // Update player in database
-                    await pool.query(`
-                        UPDATE players
-                        SET 
-                            birth_date = $1,
-                            tour = $2,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = $3
-                    `, [
-                        playerProfile.birth_date || null,
-                        memberships,
-                        player.id
-                    ]);
-
-                    console.log(`Updated data for player: ${player.first_name} ${player.last_name}`);
-                    console.log(`Tour memberships: ${memberships || 'None found'}`);
-                    console.log(`Birth date: ${playerProfile.birth_date || 'Not available'}`);
-                    console.log('---');
+                if (!tourData.players) {
+                    console.log(`No players found in ${tourName}`);
+                    continue;
                 }
-            } catch (error) {
-                console.error(`Error updating player ${player.first_name} ${player.last_name}:`, error.message);
-                continue; // Continue with next player even if one fails
-            }
 
-            // Add a small delay between requests to respect API rate limits
-            await new Promise(resolve => setTimeout(resolve, 1000));
+                // Filter for Thai players
+                const thaiPlayers = tourData.players.filter(player => 
+                    player.country?.toLowerCase() === 'tha' || 
+                    player.nationality?.toLowerCase() === 'tha' ||
+                    player.country?.toLowerCase() === 'thailand' ||
+                    player.nationality?.toLowerCase() === 'thailand'
+                );
+
+                console.log(`Found ${thaiPlayers.length} Thai players in ${tourName}`);
+                console.log('Thai players:', thaiPlayers.map(p => `${p.first_name} ${p.last_name}`));
+
+                // Insert each Thai player
+                for (const player of thaiPlayers) {
+                    try {
+                        console.log('Inserting player:', player);
+                        await pool.query(`
+                            INSERT INTO players (
+                                id, first_name, last_name, country, height, weight,
+                                birth_place, residence, college, tour, alias,
+                                abbr_name, handedness, turned_pro, member,
+                                birthday, updated_at
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP)
+                            ON CONFLICT (id) DO UPDATE SET
+                                first_name = EXCLUDED.first_name,
+                                last_name = EXCLUDED.last_name,
+                                country = EXCLUDED.country,
+                                height = EXCLUDED.height,
+                                weight = EXCLUDED.weight,
+                                birth_place = EXCLUDED.birth_place,
+                                residence = EXCLUDED.residence,
+                                college = EXCLUDED.college,
+                                tour = EXCLUDED.tour,
+                                alias = EXCLUDED.alias,
+                                abbr_name = EXCLUDED.abbr_name,
+                                handedness = EXCLUDED.handedness,
+                                turned_pro = EXCLUDED.turned_pro,
+                                member = EXCLUDED.member,
+                                birthday = EXCLUDED.birthday,
+                                updated_at = CURRENT_TIMESTAMP
+                        `, [
+                            player.id,
+                            player.first_name,
+                            player.last_name,
+                            player.country,
+                            player.height,
+                            player.weight,
+                            player.birth_place,
+                            player.residence,
+                            player.college,
+                            tourName,
+                            player.alias,
+                            player.abbr_name,
+                            player.handedness,
+                            player.turned_pro,
+                            player.member,
+                            player.birthday
+                        ]);
+
+                        console.log(`Updated Thai player: ${player.first_name} ${player.last_name} (${tourName})`);
+                    } catch (error) {
+                        console.error(`Error updating player ${player.id}:`, error);
+                        console.error('Player data:', player);
+                    }
+                }
+
+                // Add delay between tour requests to respect rate limits
+                await sleep(1000);
+            } catch (error) {
+                if (error.response?.status === 404) {
+                    console.error(`Error fetching ${tourName} data: Request failed with status code 404`);
+                } else {
+                    console.error(`Error fetching ${tourName} data:`, error.message);
+                }
+                continue;
+            }
         }
 
         console.log('Player data update completed');
     } catch (error) {
-        console.error('Error in updatePlayerData:', error);
+        console.error('Error during player update:', error);
         throw error;
     } finally {
         await pool.end();
@@ -85,5 +141,3 @@ if (require.main === module) {
             process.exit(1);
         });
 }
-
-module.exports = { updatePlayerData };

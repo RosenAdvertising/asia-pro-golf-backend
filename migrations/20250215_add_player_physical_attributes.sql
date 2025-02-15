@@ -1,0 +1,3 @@
+ALTER TABLE players
+ADD COLUMN weight INTEGER,
+ADD COLUMN height INTEGER;
