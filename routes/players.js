@@ -26,8 +26,15 @@ const upload = multer({
     }
 });
 
+// Middleware to add caching headers for player data
+const addCacheHeaders = (req, res, next) => {
+    // Cache for 1 week (604800 seconds)
+    res.set('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+    next();
+};
+
 // GET all players with available info
-router.get('/', async (req, res) => {
+router.get('/', addCacheHeaders, async (req, res) => {
     try {
         // Query both basic info and extended info
         const result = await pool.query(`
@@ -194,6 +201,72 @@ router.get('/:id', async (req, res) => {
         res.json(transformedPlayer);
     } catch (error) {
         console.error('Error fetching player:', error);
+        res.status(500).json({ 
+            error: 'Internal server error',
+            details: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});
+
+// GET player by slug
+router.get('/by-slug/:slug', addCacheHeaders, async (req, res) => {
+    try {
+        const { slug } = req.params;
+        
+        // Query to find player by slug pattern
+        const result = await pool.query(`
+            SELECT 
+                p.*,
+                ps.year_end_ranking,
+                ps.scoring_average,
+                ps.tournament_wins,
+                ps.top_10_finishes,
+                ps.career_high_ranking,
+                ps.weeks_at_career_high,
+                EXTRACT(YEAR FROM AGE(CURRENT_DATE, p.birthday)) as age
+            FROM players p
+            LEFT JOIN player_statistics ps ON p.id = ps.player_id
+            WHERE LOWER(CONCAT(p.first_name, ' ', p.last_name))
+                SIMILAR TO $1
+            LIMIT 1
+        `, [`${slug.replace(/-/g, ' ')}%`]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Player not found' });
+        }
+
+        const player = result.rows[0];
+        res.json({
+            id: player.id,
+            first_name: player.first_name,
+            last_name: player.last_name,
+            country: player.country,
+            nationality: player.nationality,
+            profile_image_url: player.profile_image_url,
+            tour: player.tour,
+            birthday: player.birthday,
+            age: player.age,
+            alias: player.alias,
+            abbr_name: player.abbr_name,
+            handedness: player.handedness,
+            turned_pro: player.turned_pro,
+            member: player.member,
+            instagram_handle: player.instagram_handle,
+            official_website: player.official_website,
+            equipment_sponsor: player.equipment_sponsor,
+            year_end_ranking: player.year_end_ranking || null,
+            scoring_average: player.scoring_average || null,
+            tournament_wins: player.tournament_wins || 0,
+            top_10_finishes: player.top_10_finishes || null,
+            career_high_ranking: player.career_high_ranking || null,
+            weeks_at_career_high: player.weeks_at_career_high || null,
+            updated: player.updated,
+            image_url: player.image_url || null,
+            lpga_url: player.lpga_url || null
+        });
+    } catch (error) {
+        console.error('Error in /players/by-slug route:', error);
         res.status(500).json({ 
             error: 'Internal server error',
             details: error.message,
